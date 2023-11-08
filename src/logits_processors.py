@@ -44,6 +44,9 @@ class NumberStoppingCriteria(StoppingCriteria):
             
         )
 
+        if input_ids[0][-1] == self.tokenizer.eos_token_id:
+            return True
+
         if decoded.count(".") > 1:
             return True
 
@@ -82,6 +85,11 @@ class OutputNumbersTokens(LogitsWarper):
                 all(c.isdigit() or c == "." for c in token_str)
                 and token_str.count(".") <= 1
             ):
+                # Ensures theres no weird double digit numerical tokens
+                #if len(token_str) <= 1:
+                #    self.allowed_mask[token_id] = True
+                self.allowed_mask[token_id] = True
+            elif token_id == tokenizer.eos_token_id:
                 self.allowed_mask[token_id] = True
 
         #breakpoint()

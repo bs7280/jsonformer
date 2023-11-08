@@ -64,7 +64,7 @@ class Jsonformer:
         )
         #breakpoint()
         response = self.model.generate(
-            input_tokens,
+            input_ids=input_tokens,
             max_new_tokens=self.max_number_tokens,
             num_return_sequences=1,
             logits_processor=[self.number_logit_processor],
@@ -93,7 +93,10 @@ class Jsonformer:
         prompt = self.get_prompt()
         self.debug("[generate_boolean]", prompt, is_prompt=True)
 
-        input_tensor = self.tokenizer.encode(prompt, return_tensors="pt")
+        # Note - ive noticed without the + pad_token, model gets very confused
+        # since it by default wants to start with a prediction of [0, <true/false token id>, 1]
+        # where 0 is pad token, 1 is EOS token
+        input_tensor = self.tokenizer.encode(prompt + self.tokenizer.pad_token, return_tensors="pt")
         output = self.model.forward(input_tensor.to(self.model.device))
         logits = output.logits[0, -1]
 
@@ -116,9 +119,8 @@ class Jsonformer:
             self.model.device
         )
 
-        #breakpoint()
         response = self.model.generate(
-            input_tokens,
+            input_ids=input_tokens,
             max_new_tokens=self.max_string_token_length,
             num_return_sequences=1,
             temperature=self.temperature,
@@ -229,16 +231,15 @@ class Jsonformer:
 
         return obj
 
-    def get_prompt(self):
+    def get_prompt(self, next_key=None, next_obj=None):
         # Find key of next token
-        next_key = list(self.value.keys())[-1]
-        next_obj = self.json_schema['properties'].get(next_key)
+        if next_key is None:
+            next_key = list(self.value.keys())[-1]
+        if next_obj is None:
+            next_obj = self.json_schema['properties'].get(next_key)
 
         template = """{prompt}\nOutput result in the following JSON schema format:\n{schema}\nDescription for next item:\n{description}\nResult: {progress}"""
 
-
-
-        breakpoint()
         progress = json.dumps(self.value)
         gen_marker_index = progress.find(f'"{self.generation_marker}"')
         if gen_marker_index != -1:
@@ -246,7 +247,7 @@ class Jsonformer:
         else:
             raise ValueError("Failed to find generation marker")
 
-        desc = next_obj.get('description', 'none')
+        desc = next_obj.get('description', '')
 
         prompt = template.format(
             prompt=self.prompt,
@@ -280,7 +281,7 @@ class JsonFormerText2Text(Jsonformer):
         )
         #breakpoint()
         response = self.model.generate(
-            input_tokens,
+            input_ids=input_tokens,
             max_new_tokens=self.max_number_tokens,
             num_return_sequences=1,
             logits_processor=[self.number_logit_processor],
@@ -290,17 +291,25 @@ class JsonFormerText2Text(Jsonformer):
             temperature=temperature or self.temperature,
             pad_token_id=self.tokenizer.eos_token_id,
         )
+        
         response = self.tokenizer.decode(response[0], skip_special_tokens=True)
 
         # text2text does not include prompt in output
         # response = response[len(prompt) :]
+
+        # Theres a weird bug in FastTransformers that causes a space to be added before every token??
+        response = response.replace(' ', '')
+
+
         response = response.strip().rstrip(".")
         self.debug("[generate_number]", response)
         try:
             return float(response)
         except ValueError:
-            if iterations >= 0:
-                raise ValueError(f"Failed to generate a valid number response: {response}")
+            if iterations >= 3:
+                print(f"Warning Failed to generate a valid number response: {response}")
+                #warn ValueError(f"Failed to generate a valid number response: {response}")
+                return None
 
             return self.generate_number(temperature=self.temperature * 1.3, iterations=iterations + 1)
 
@@ -309,7 +318,11 @@ class JsonFormerText2Text(Jsonformer):
         prompt = self.get_prompt()
         self.debug("[generate_boolean]", prompt, is_prompt=True)
 
-        input_tensor = self.tokenizer.encode(prompt, return_tensors="pt")
+        # Note - ive noticed without the + pad_token, model gets very confused
+        # since it by default wants to start with a prediction of [0, <true/false token id>, 1]
+        # where 0 is pad token, 1 is EOS token
+        input_tensor = self.tokenizer.encode(prompt + self.tokenizer.pad_token, return_tensors="pt")
+        #input_tensor = self.tokenizer.encode(prompt, return_tensors="pt")
         input_ids = input_tensor.to(self.model.device)
         output = self.model.forward(input_ids, decoder_input_ids=input_ids)
         logits = output.logits[0, -1]
@@ -317,10 +330,12 @@ class JsonFormerText2Text(Jsonformer):
         # todo: this assumes that "true" and "false" are both tokenized to a single token
         # this is probably not true for all tokenizers
         # this can be fixed by looking at only the first token of both "true" and "false"
-        true_token_id = self.tokenizer.encode('True')[0] #self.tokenizer.convert_tokens_to_ids("yes") #"True")
-        false_token_id = self.tokenizer.encode('False')[0] #self.tokenizer.convert_tokens_to_ids("no") #"False")
+        true_token_id = self.tokenizer.encode('true')[0] #self.tokenizer.convert_tokens_to_ids("yes") #"True")
+        false_token_id = self.tokenizer.encode('false')[0] #self.tokenizer.convert_tokens_to_ids("no") #"False")
 
         # TODO post run - use:
+
+        #breakpoint()
 
 
         # (Pdb) self.tokenizer.encode('False')[0]
@@ -341,10 +356,12 @@ class JsonFormerText2Text(Jsonformer):
 
         return result.item()
 
-    def get_prompt(self):
+    def get_prompt(self, next_key=None, next_obj=None):
         # Find key of next token
-        next_key = list(self.value.keys())[-1]
-        next_obj = self.json_schema['properties'].get(next_key)
+        if next_key is None:
+            next_key = list(self.value.keys())[-1]
+        if next_obj is None:
+            next_obj = self.json_schema['properties'].get(next_key)
 
 
 
@@ -362,21 +379,103 @@ class JsonFormerText2Text(Jsonformer):
 
 
         #breakpoint()
-        progress = json.dumps(self.value)
-        gen_marker_index = progress.find(f'"{self.generation_marker}"')
-        if gen_marker_index != -1:
-            progress = progress[:gen_marker_index]
-        else:
-            raise ValueError("Failed to find generation marker")
 
         if False:
-            prompt = template.format(
-                prompt=self.prompt,
-                schema=json.dumps(self.json_schema),
-                description=desc,
-                progress=progress,
-            )
-        
+            progress = json.dumps(self.value)
+            gen_marker_index = progress.find(f'"{self.generation_marker}"')
+            if gen_marker_index != -1:
+                progress = progress[:gen_marker_index]
+            else:
+                raise ValueError("Failed to find generation marker")
+
+            if False:
+                prompt = template.format(
+                    prompt=self.prompt,
+                    schema=json.dumps(self.json_schema),
+                    description=desc,
+                    progress=progress,
+                )
+            
         return prompt
 
         
+class JsonFormerTrainDataGenerator(JsonFormerText2Text):
+
+    def __init__(
+        self,
+        model: PreTrainedModel,
+        tokenizer: PreTrainedTokenizer,
+        json_schema: Dict[str, Any],
+        prompt: str,
+        *,
+        debug: bool = False,
+        max_array_length: int = 10,
+        max_number_tokens: int = 6,
+        temperature: float = 1.0,
+        max_string_token_length: int = 10,
+    ):
+        #self.model = model
+        #self.tokenizer = tokenizer
+        self.json_schema = json_schema
+        self.prompt = prompt
+
+        #self.number_logit_processor = OutputNumbersTokens(self.tokenizer, self.prompt)
+
+        self.generation_marker = "|GENERATION|"
+        self.debug_on = debug
+        self.max_array_length = max_array_length
+
+        self.max_number_tokens = max_number_tokens
+        self.temperature = temperature
+        self.max_string_token_length = max_string_token_length
+
+
+    def generate_value(
+        self,
+        schema: Dict[str, Any],
+        obj: Union[Dict[str, Any], List[Any]],
+        key: Union[str, None] = None,
+    ) -> Any:
+        schema_type = schema["type"]
+
+
+
+        if schema_type in ("number", "string", "boolean"):
+            prompt = self.get_prompt(next_key=key)
+            return prompt
+        else:
+            print(schema_type)
+            breakpoint()
+
+
+        if schema_type == "number":
+            if key:
+                obj[key] = self.generation_marker
+            else:
+                obj.append(self.generation_marker)
+            return self.generate_number()
+        elif schema_type == "boolean":
+            if key:
+                obj[key] = self.generation_marker
+            else:
+                obj.append(self.generation_marker)
+            return self.generate_boolean()
+        elif schema_type == "string":
+            if key:
+                obj[key] = self.generation_marker
+            else:
+                obj.append(self.generation_marker)
+            return self.generate_string()
+        elif schema_type == "array":
+            new_array = []
+            obj[key] = new_array
+            return self.generate_array(schema["items"], new_array)
+        elif schema_type == "object":
+            new_obj = {}
+            if key:
+                obj[key] = new_obj
+            else:
+                obj.append(new_obj)
+            return self.generate_object(schema["properties"], new_obj)
+        else:
+            raise ValueError(f"Unsupported schema type: {schema_type}")

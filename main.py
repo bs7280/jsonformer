@@ -2,8 +2,10 @@ from transformers import pipeline
 import transformers
 import accelerate
 import time
-from src.jsonformer import Jsonformer, JsonFormerText2Text
+from src.jsonformer import Jsonformer, JsonFormerText2Text, JsonFormerTrainDataGenerator
 from transformers import AutoModelForCausalLM, AutoTokenizer
+import hashlib
+from peft import PeftModel, PeftConfig
 
 from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline, AutoModelForSeq2SeqLM
 import pandas as pd
@@ -11,7 +13,7 @@ import random
 import torch
 from src.utils import make_random_loads
 import numpy as np
-
+from datasets import Dataset
 
 # Text-generation
 model_name = 'tiiuae/falcon-7b'
@@ -21,7 +23,7 @@ model_name = 'databricks/dolly-v2-3b'
 ## Text2text
 model_type = 'text2text-generation'
 model_name = 'google/flan-t5-large'
-# model_name = 'google/flan-t5-xxl'
+#model_name = 'google/flan-t5-xxl'
 #model_name = "tiiuae/falcon-rw-1b"
 
 #model_name = 'cerebras/Cerebras-GPT-590M'
@@ -52,9 +54,9 @@ json_schema = {
             "description": "What is the type of message often Van, Reefer, or Flatbed?"
         },
         "weight": {
-            "type": "number", "description":
-            "Get the weight as a number from this message"
-                   },
+            "type": "number", 
+            "description": "Get the weight as a number from this message"
+        },
         "weight_unit": {"type": "string"},
         "hot": {
             "type": "boolean",
@@ -68,13 +70,13 @@ json_schema = {
         },
         "latefee": {
             "type": "number",
-            "required": False,
+            "default": 0,
             "description": "What is the dollar amount fee if a load is late? If not present return with 0",
         },
         "dropoff_time": {
             "type": "string",
-            "required": False,
-            "description": "What is the HH:MM dropoff time if it exists? If not present return with None"
+            "default": '',
+            "description": "What is the HH:MM dropoff time if it exists? If not present return with empty str"
         }
     }
 }
@@ -88,24 +90,103 @@ def process_raw_text(model, tokenizer, json_schema, raw_text):
     # TODO take the __init__ out of this method for speed (don't reload models)
     # though I could be wrong here
     jsonformer = JsonFormerText2Text(model, tokenizer, json_schema, raw_text, debug=False)
+
+    
     generated_data = jsonformer()
     
     return generated_data
 
 
+def load_lora_model(peft_model_id):
+    # Load LORA config (local file) which shouldn't be that big
+    config = PeftConfig.from_pretrained(peft_model_id)
 
-def main(force_json=True, verbose=False):
+    # Load mdoels from 
+    print(f"Loading base model from Peft lora config: {config.base_model_name_or_path}")
+    model_name = config.base_model_name_or_path
+    model = AutoModelForSeq2SeqLM.from_pretrained(config.base_model_name_or_path) #, torch_dtype="auto", device_map="auto")
+    tokenizer = AutoTokenizer.from_pretrained(config.base_model_name_or_path)
 
-    if force_json:
-        if model_type == 'text-generation':
-            model = AutoModelForCausalLM.from_pretrained(model_name)
-            tokenizer = AutoTokenizer.from_pretrained(model_name)
-        elif model_type == 'text2text-generation':
-            tokenizer = AutoTokenizer.from_pretrained(model_name)
-            # TODO figure out load_in_8bit error later
-            model = AutoModelForSeq2SeqLM.from_pretrained(model_name, load_in_8bit=False)
+    # Load the Lora model
+    model = PeftModel.from_pretrained(model, peft_model_id)
 
-    loads, load_strs = make_random_loads(30)
+    return model, tokenizer 
+
+def load_base_model(model_name):
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    # NOTE 8 bit mode only works on GPU
+    model = AutoModelForSeq2SeqLM.from_pretrained(model_name, load_in_8bit=False)
+    return model, tokenizer
+
+def make_training_data(n_loads):
+    loads, load_strs = make_random_loads(n_loads, json_schema)
+
+    #tokenizer = AutoTokenizer.from_pretrained(model_name)
+    # TODO figure out load_in_8bit error later
+    #model = AutoModelForSeq2SeqLM.from_pretrained(model_name, load_in_8bit=False)
+    
+
+    
+    out = []
+    elapsed = []
+    for load_real, load_str in list(zip(loads, load_strs)):
+        _start_time = time.time()
+        jsonformer = JsonFormerTrainDataGenerator(None, None, json_schema, load_str, debug=False)
+        generated_data = jsonformer()
+
+        #pred = process_raw_text(model, tokenizer, json_schema, load_str)
+
+        df_iter = pd.DataFrame({'real':pd.Series(load_real),'prompt':pd.Series(generated_data)})
+
+        df_iter['input_hex'] = hashlib.md5(load_str.encode()).hexdigest()[:16]
+        df_iter['raw_str'] = load_str
+        out.append(df_iter)
+        
+    df_out = pd.concat(out)
+
+    np.where(
+        isinstance(
+            df_out['real'].loc['hot'].iloc[0], bool
+        ),
+        df_out['real'].astype('str').str.lower(),
+        df_out['real'].astype('str')
+    )
+
+
+    np.where(isinstance(df_out['real'], bool),df_out['real'].astype('str').str.lower(),df_out['real'].astype('str'))
+
+    df_out['real'] = df_out['real'].astype('str').replace('True', 'true').replace('False', 'false')
+
+    df_out['out_type'] = df_out.index.map(dict([(x[0],x[1].get('type')) for x in json_schema['properties'].items()]))
+
+    ds = Dataset.from_dict({
+        "prompt": df_out['prompt'],
+        "real": df_out['real'],
+        "out_type": df_out['out_type'],
+        "out_col": df_out.index 
+    })
+    breakpoint()
+    ds.to_json(f'testdataset_{n_loads}.json')
+
+
+def main(verbose=False, lora_path=None):
+
+
+    if model_type == 'text-generation':
+        raise ValueError("Stopped doing this")
+        #model = AutoModelForCausalLM.from_pretrained(model_name)
+        #tokenizer = AutoTokenizer.from_pretrained(model_name)
+    #elif model_type == 'text2text-generation':
+
+
+    if lora_path:
+        model, tokenizer = load_lora_model(peft_model_id=lora_path)
+    else:
+        model, tokenizer = load_base_model(model_name)
+
+
+
+    loads, load_strs = make_random_loads(50, json_schema)
 
     
 
@@ -117,17 +198,9 @@ def main(force_json=True, verbose=False):
         if verbose:
             print(f"Input: {load_str}")
             print("LLM:")
-        
-        if force_json == True:
-            pred = process_raw_text(model, tokenizer, json_schema, load_str)
-        else:
-            prompt = 'Your job is to extract information from the given message and populate a json sctructure using keywords from the message. The message: Flatbed load from Calverton, NY to Eagle, NE total weight 34271 lbs TEAM LOAD\nOutput result in the following JSON schema format:\n{"type": "object", "properties": {"origin": {"type": "string"}, "destination": {"type": "string"}, "equipment": {"type": "string", "enum": ["Van", "Reefer", "Flatbed"], "description": "The type of truckload, often Van, Reefer, or Flatbed"}, "weight": {"type": "number"}, "weight_unit": {"type": "string"}, "hot": {"type": "boolean", "default": false, "description": "HOT load, hot"}, "team": {"type": "boolean", "default": false, "description": "If a load requires two drivers. Ex: TEAM, TEAM load"}, "latefee": {"type": "number", "required": false, "description": "dollar amount fee if a load is late"}, "dropoff time": {"type": "string", "required": false}}}\nResult: {"origin": '
-            _pipeline = transformers.pipeline(
-                model="databricks/dolly-v2-3b",
-                torch_dtype=torch.float16,
-                trust_remote_code=True, device_map="auto")
-            pred = _pipeline([prompt])
     
+        pred = process_raw_text(model, tokenizer, json_schema, load_str)
+
         out.append(pred)
 
         elapsed.append(time.time() - _start_time)
@@ -141,25 +214,28 @@ def main(force_json=True, verbose=False):
 
     df_pred = pd.DataFrame(out)
     df_real = pd.DataFrame(loads)
-    
-    cols = df_pred.columns.str.capitalize()
-    for col in cols:
-        if col not in df_real.columns:
-            df_real['Latefee'] = None
-    df_real = df_real[cols]
-    df_real = df_real.rename(columns=dict(
-        zip(
-            df_real.columns,
-            df_real.columns.str.lower()
-            )
-        )
-    )
 
-    df_pred['origin_state'] = df_pred['origin_state'].str.upper()
-    df_pred['destination_state'] = df_pred['destination_state'].str.upper()
-    df_real['latefee'] = df_real['latefee'].fillna(0)
-    df_real['hot'] = df_real['hot'].fillna(False)
-    df_real['team'] = df_real['team'].fillna(False)
+
+    df_real = df_real[df_pred.columns]
+    
+    #cols = df_pred.columns.str.capitalize()
+    #for col in cols:
+    #    if col not in df_real.columns:
+    #        df_real['Latefee'] = None
+    #df_real = df_real[cols]
+    #df_real = df_real.rename(columns=dict(
+    #    zip(
+    #        df_real.columns,
+    #        df_real.columns.str.lower()
+    #        )
+    #    )
+    #)
+
+    #df_pred['origin_state'] = df_pred['origin_state'].str.upper()
+    #df_pred['destination_state'] = df_pred['destination_state'].str.upper()
+    #df_real['latefee'] = df_real['latefee'].fillna(0)
+    #df_real['hot'] = df_real['hot'].fillna(False)
+    #df_real['team'] = df_real['team'].fillna(False)
 
 
     df_agg = (df_real == df_pred)
@@ -174,7 +250,14 @@ def main(force_json=True, verbose=False):
     print(df_summary_percent.T)
 
     print(f"average time: {np.mean(elapsed)}")
-    breakpoint()
+    #breakpoint()
 
 if __name__ == '__main__':
-    main(verbose=True)
+
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("action")
+    #make_training_data(500)
+    #main(verbose=True, lora_path=None)
+    main(verbose=True, lora_path="loras/lora_flan_l_1epoc_b/")
+    #main(verbose=True, lora_path="loras/lora_flan_xxl_1epoc_a/")
