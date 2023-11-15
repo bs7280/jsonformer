@@ -11,7 +11,7 @@ import time
 # Clear history button
 # reorder cells
 
-st.title('Load Formatter')
+st.title('Data Formatter')
 
 from main import process_raw_text, load_lora_model, json_schema
 
@@ -101,7 +101,7 @@ def pred_requests(request_data):
 
 def button1_callback():
     if len(load_data) > 0:
-        pred_requests(load_data.split('\n'))
+        pred_requests(load_data)
 
 def rerun_inputs_callback():
 
@@ -129,13 +129,21 @@ def get_df_as_csv():
     df = pd.DataFrame(st.session_state['prediction_out'])
     return df.to_csv().encode('utf-8')
 
+def delete_key_from_schema(key):
+    print(key)
+    print(st.session_state.out_schema['properties'].pop(key))
+
 ###### Start of application #######
 ###################################
 
 
 st.header("Enter raw input:")
-st.write("Seperate outputs by linebreaks")
+multi_entry = st.checkbox("Seperate outputs by linebreaks", value=True)
 load_data = st.text_area(label="Raw text", key='user_input')
+if multi_entry:
+    load_data = load_data.split('\n')
+else:
+    load_data = [load_data]
 
 
 # https://stackoverflow.com/a/77332142
@@ -194,7 +202,12 @@ if st.button(label="Add field"):
 
 ## Show current items
 for key, item in st.session_state['out_schema']['properties'].items():
-    st.write(f"- {key} ({item['type']}) - {item.get('description')}")
+    col0, col1 = st.columns([1, 1])
+
+    with col0:
+        st.write(f"- {key} ({item['type']}) - {item.get('description')}")
+    with col1:
+        st.button("Delete", key=key, on_click=lambda : delete_key_from_schema(key))
 
 
 

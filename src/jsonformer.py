@@ -445,7 +445,6 @@ class JsonFormerTrainDataGenerator(JsonFormerText2Text):
             return prompt
         else:
             print(schema_type)
-            breakpoint()
 
 
         if schema_type == "number":
