@@ -77,9 +77,36 @@ json_schema = {
             "type": "string",
             "default": '',
             "description": "What is the HH:MM dropoff time if it exists? If not present return with empty str"
-        }
+        },
+        "DOT_Numbers": {
+            "type": "array",
+            "items": {
+                "DOT": {
+                    "type": "string", 
+                    'description': 'What is the DOT number of this message?',
+                },
+            }
+        },
     }
 }
+
+
+json_schema_test = {
+    "type": "object",
+    "properties": {
+        "DOT_Numbers": {
+            "type": "array",
+            "items": {
+                "DOT": {
+                    "type": "string", 
+                    'description': 'What is the DOT number of this message?',
+                },
+            }
+        },
+    }
+}
+
+#json_schema['properties'].pop('DOT_number')
 
 
 
@@ -131,7 +158,7 @@ def make_training_data(n_loads):
     elapsed = []
     for load_real, load_str in list(zip(loads, load_strs)):
         _start_time = time.time()
-        jsonformer = JsonFormerTrainDataGenerator(None, None, json_schema, load_str, debug=False)
+        jsonformer = JsonFormerTrainDataGenerator(None, None, json_schema, load_str, debug=False, real_value=load_real)
         generated_data = jsonformer()
 
         #pred = process_raw_text(model, tokenizer, json_schema, load_str)
@@ -153,7 +180,10 @@ def make_training_data(n_loads):
     )
 
 
-    np.where(isinstance(df_out['real'], bool),df_out['real'].astype('str').str.lower(),df_out['real'].astype('str'))
+    np.where(
+        isinstance(df_out['real'], bool),
+        df_out['real'].astype('str').str.lower(),
+        df_out['real'].astype('str'))
 
     df_out['real'] = df_out['real'].astype('str').replace('True', 'true').replace('False', 'false')
 
@@ -165,9 +195,13 @@ def make_training_data(n_loads):
         "out_type": df_out['out_type'],
         "out_col": df_out.index 
     })
-    breakpoint()
-    ds.to_json(f'testdataset_{n_loads}.json')
+    
+    list_order = list(range(0, df_out.shape[0]))
+    random.shuffle(list_order)
 
+    df_out = df_out.iloc[list_order]
+
+    ds.to_json(f'testdataset_{n_loads}.json')
 
 def main(verbose=False, lora_path=None):
 
@@ -199,7 +233,7 @@ def main(verbose=False, lora_path=None):
             print(f"Input: {load_str}")
             print("LLM:")
     
-        pred = process_raw_text(model, tokenizer, json_schema, load_str)
+        pred = process_raw_text(model, tokenizer, json_schema_test, load_str)
 
         out.append(pred)
 
@@ -257,7 +291,17 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("action")
-    #make_training_data(500)
+
+    if False:
+        loads, load_strs = make_random_loads(5, json_schema)
+
+        print(load_strs)
+        print()
+        print()
+        for l in loads:
+            print(l)
+
+    make_training_data(200)
     #main(verbose=True, lora_path=None)
-    main(verbose=True, lora_path="loras/lora_flan_l_1epoc_b/")
+    #main(verbose=True, lora_path="loras/lora_flan_l_1epoc_b/")
     #main(verbose=True, lora_path="loras/lora_flan_xxl_1epoc_a/")

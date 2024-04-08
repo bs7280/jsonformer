@@ -75,8 +75,6 @@ class Jsonformer:
             pad_token_id=self.tokenizer.eos_token_id,
         )
         response = self.tokenizer.decode(response[0], skip_special_tokens=True)
-        print(response)
-        breakpoint()
 
         response = response[self.get_prompt_length(prompt) :]
         response = response.strip().rstrip(".")
@@ -112,8 +110,8 @@ class Jsonformer:
 
         return result.item()
 
-    def generate_string(self) -> str:
-        prompt = self.get_prompt() + '"'
+    def generate_string(self, next_key=None, next_obj=None) -> str:
+        prompt = self.get_prompt(next_key=next_key, next_obj=next_obj) + '"'
         self.debug("[generate_string]", prompt, is_prompt=True)
         input_tokens = self.tokenizer.encode(prompt, return_tensors="pt").to(
             self.model.device
@@ -163,6 +161,8 @@ class Jsonformer:
         obj: Union[Dict[str, Any], List[Any]],
         key: Union[str, None] = None,
     ) -> Any:
+        #print(f"DEBUG - generate_value:\n\t schema: {schema}\n\t obj: {obj}\n\t key: {key}")
+
         schema_type = schema["type"]
         if schema_type == "number":
             if key:
@@ -181,7 +181,7 @@ class Jsonformer:
                 obj[key] = self.generation_marker
             else:
                 obj.append(self.generation_marker)
-            return self.generate_string()
+            return self.generate_string(next_key=key, next_obj=schema)
         elif schema_type == "array":
             new_array = []
             obj[key] = new_array
@@ -197,9 +197,23 @@ class Jsonformer:
             raise ValueError(f"Unsupported schema type: {schema_type}")
 
     def generate_array(self, item_schema: Dict[str, Any], obj: Dict[str, Any]) -> list:
+
+        if len(item_schema) > 1:
+            raise NotImplementedError("More than one items per array row not supported")
+        key, schema = list(item_schema.items())[0]
+
         for _ in range(self.max_array_length):
             # forces array to have at least one element
-            element = self.generate_value(item_schema, obj)
+            
+            #_schema = item_schema.get(key)
+
+            #_schema = {'type': 'string', 'description': 'What is the DOT number of this message?'}
+            #key = 'VIN'
+            #element = self.generate_value(item_schema, obj)
+            if len(obj) > 0:
+                schema['existing_predictions'] = [x for x in obj if x != self.generation_marker]
+                
+            element = self.generate_value(schema, obj)
             print(f"Respone: {element}")
             obj[-1] = element
 
@@ -207,12 +221,14 @@ class Jsonformer:
             input_prompt = self.get_prompt()
             obj.pop()
             input_tensor = self.tokenizer.encode(input_prompt, return_tensors="pt")
-            output = self.model.forward(input_tensor.to(self.model.device))
+            output = self.model.forward(input_tensor.to(self.model.device), decoder_input_ids=input_tensor)
             logits = output.logits[0, -1]
 
 
             top_indices = logits.topk(30).indices
             sorted_token_ids = top_indices[logits[top_indices].argsort(descending=True)]
+
+            tok = [self.tokenizer.decode(x) for x in sorted_token_ids]
 
             found_comma = False
             found_close_bracket = False
@@ -238,7 +254,6 @@ class Jsonformer:
         if next_obj is None:
             next_obj = self.json_schema['properties'].get(next_key)
 
-        template = """{prompt}\nOutput result in the following JSON schema format:\n{schema}\nDescription for next item:\n{description}\nResult: {progress}"""
 
         progress = json.dumps(self.value)
         gen_marker_index = progress.find(f'"{self.generation_marker}"')
@@ -248,6 +263,8 @@ class Jsonformer:
             raise ValueError("Failed to find generation marker")
 
         desc = next_obj.get('description', '')
+
+        template = """{prompt}\nOutput result in the following JSON schema format:\n{schema}\nDescription for next item:\n{description}\nResult: {progress}"""
 
         prompt = template.format(
             prompt=self.prompt,
@@ -365,6 +382,7 @@ class JsonFormerText2Text(Jsonformer):
 
 
 
+        #if isinstance(next_obj, dict):
         desc = next_obj.get('description', None)
         d_type = next_obj.get('type')
 
@@ -378,7 +396,10 @@ class JsonFormerText2Text(Jsonformer):
         prompt = f"""{header} \n Message: {self.prompt}"""
 
 
-        #breakpoint()
+        if next_obj.get('existing_predictions'):
+            existing = ', '.join(next_obj['existing_predictions'])
+
+            prompt = f"""{header} \n\nExisting Values:\n{existing}\n\nMessage: {self.prompt}"""
 
         if False:
             progress = json.dumps(self.value)
@@ -408,6 +429,7 @@ class JsonFormerTrainDataGenerator(JsonFormerText2Text):
         json_schema: Dict[str, Any],
         prompt: str,
         *,
+        real_value=None,
         debug: bool = False,
         max_array_length: int = 10,
         max_number_tokens: int = 6,
@@ -418,6 +440,8 @@ class JsonFormerTrainDataGenerator(JsonFormerText2Text):
         #self.tokenizer = tokenizer
         self.json_schema = json_schema
         self.prompt = prompt
+
+        self.real_value = real_value
 
         #self.number_logit_processor = OutputNumbersTokens(self.tokenizer, self.prompt)
 
@@ -443,10 +467,15 @@ class JsonFormerTrainDataGenerator(JsonFormerText2Text):
         if schema_type in ("number", "string", "boolean"):
             prompt = self.get_prompt(next_key=key)
             return prompt
+        elif schema_type == 'array':
+            breakpoint()
+            prompt = self.get_prompt(next_key=key)
+            return prompt
         else:
             print(schema_type)
 
 
+        # Can delete eventually
         if schema_type == "number":
             if key:
                 obj[key] = self.generation_marker
@@ -466,6 +495,7 @@ class JsonFormerTrainDataGenerator(JsonFormerText2Text):
                 obj.append(self.generation_marker)
             return self.generate_string()
         elif schema_type == "array":
+            breakpoint()
             new_array = []
             obj[key] = new_array
             return self.generate_array(schema["items"], new_array)
